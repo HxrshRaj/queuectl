@@ -1,121 +1,140 @@
 import os
+import signal
 import time
 import uuid
-import subprocess
 
 from queuectl.repositories.job_repository import JobRepository
 from queuectl.repositories.worker_repository import WorkerRepository
+from queuectl.repositories.config_repository import ConfigRepository
+from queuectl.utils.executor import Executor
+from queuectl.utils.recovery import RecoveryManager
 
 
 class Worker:
 
     def __init__(self):
-
-        self.job_repo = JobRepository()
-        self.worker_repo = WorkerRepository()
-
         self.worker_id = str(uuid.uuid4())
-
         self.pid = os.getpid()
+
+        self.jobs = JobRepository()
+        self.workers = WorkerRepository()
+        self.config = ConfigRepository()
+        self.executor = Executor()
+        self.recovery = RecoveryManager()
 
         self.running = True
 
-        self.poll_interval = 1
+        signal.signal(signal.SIGINT, self.stop)
+        signal.signal(signal.SIGTERM, self.stop)
+
+    def stop(self, signum=None, frame=None):
+        self.running = False
 
     def start(self):
 
-        self.worker_repo.register(
+        self.config.initialize()
+
+        self.recovery.recover()
+
+        self.workers.register(
             self.worker_id,
             self.pid,
         )
 
-        print(f"Worker {self.worker_id} started")
-
         try:
-
-            while self.running:
-
-                self.worker_repo.heartbeat(
-                    self.worker_id,
-                )
-
-                self.job_repo.recover_processing_jobs()
-
-                if self.worker_repo.should_stop(
-                    self.worker_id,
-                ):
-                    break
-
-                job = self.job_repo.claim_job(
-                    self.worker_id,
-                )
-
-                if job is None:
-                    time.sleep(
-                        self.poll_interval,
-                    )
-                    continue
-
-                self.execute_job(job)
+            self.loop()
 
         finally:
+            try:
+                self.workers.mark_stopped(
+                    self.worker_id
+                )
+            finally:
+                self.workers.unregister(
+                    self.worker_id
+                )
 
-            self.worker_repo.unregister(
-                self.worker_id,
+    def loop(self):
+
+        poll_interval = self.config.get_int(
+            "poll-interval"
+        )
+
+        if poll_interval is None:
+            poll_interval = 1
+
+        while self.running:
+
+            if self.workers.should_stop(
+                self.worker_id
+            ):
+                break
+
+            self.workers.heartbeat(
+                self.worker_id
             )
 
-            print("Worker stopped")
-    def execute_job(self, job):
+            job = self.jobs.claim_job(
+                self.worker_id
+            )
 
-        print(f"Executing Job #{job['id']}")
+            if job is None:
+                time.sleep(poll_interval)
+                continue
+
+            self.process_job(job)
+    def process_job(self, job):
 
         try:
-
-            result = subprocess.run(
-                job["command"],
-                shell=True,
-                capture_output=True,
-                text=True,
+            result = self.executor.execute(
+                job["command"]
             )
 
-            if result.returncode == 0:
-
-                self.job_repo.mark_completed(
-                    job["id"],
+            if result.success:
+                self.jobs.mark_completed(
+                    job["id"]
                 )
 
                 print(
-                    f"Job #{job['id']} completed"
+                    f"[{self.worker_id}] Job {job['id']} completed"
                 )
 
-            else:
+                return
 
-                failed_job = self.job_repo.mark_failed(
-                    job["id"],
-                    result.stderr.strip()
-                    if result.stderr
-                    else f"Exit Code {result.returncode}",
-                )
-
-                self.job_repo.retry_job(
-                    failed_job["id"],
-                )
-
-                print(
-                    f"Job #{job['id']} failed"
-                )
-
-        except Exception as e:
-
-            failed_job = self.job_repo.mark_failed(
-                job["id"],
-                str(e),
+            self.handle_failure(
+                job,
+                result.stderr or f"Exit code {result.exit_code}",
             )
 
-            self.job_repo.retry_job(
-                failed_job["id"],
+        except Exception as exc:
+            self.handle_failure(
+                job,
+                str(exc),
+            )
+
+    def handle_failure(self, job, error):
+
+        updated = self.jobs.mark_failed(
+            job["id"],
+            error,
+        )
+
+        if updated["attempts"] >= updated["max_retries"]:
+
+            self.jobs.move_to_dead(
+                updated["id"],
             )
 
             print(
-                f"Unexpected error while executing Job #{job['id']}"
+                f"[{self.worker_id}] Job {updated['id']} moved to DLQ"
             )
+
+            return
+
+        self.jobs.retry_job(
+            updated["id"]
+        )
+
+        print(
+            f"[{self.worker_id}] Job {updated['id']} scheduled for retry ({updated['attempts']}/{updated['max_retries']})"
+        )
