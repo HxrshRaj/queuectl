@@ -13,9 +13,9 @@ class ExecutionResult:
 class Executor:
 
     @staticmethod
-    def run(command: str) -> ExecutionResult:
+    def execute(command: str) -> ExecutionResult:
 
-        result = subprocess.run(
+        process = subprocess.run(
             command,
             shell=True,
             capture_output=True,
@@ -23,8 +23,8 @@ class Executor:
         )
 
         return ExecutionResult(
-            success=result.returncode == 0,
-            exit_code=result.returncode,
-            stdout=result.stdout.strip(),
-            stderr=result.stderr.strip(),
+            success=process.returncode == 0,
+            exit_code=process.returncode,
+            stdout=process.stdout.strip(),
+            stderr=process.stderr.strip(),
         )
