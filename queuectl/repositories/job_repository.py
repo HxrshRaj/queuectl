@@ -1,10 +1,31 @@
+from datetime import datetime
+
+from sqlalchemy import insert
+
 from queuectl.database.db import engine
 from queuectl.database.schema import jobs
 
 
 class JobRepository:
     def enqueue(self, command: str):
-        raise NotImplementedError
+        now = datetime.utcnow()
+
+        with engine.begin() as connection:
+            result = connection.execute(
+                insert(jobs).values(
+                    command=command,
+                    state="pending",
+                    attempts=0,
+                    max_retries=3,
+                    claimed_by=None,
+                    claimed_at=None,
+                    next_retry_at=None,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+
+        return result.inserted_primary_key[0]
 
     def claim_job(self, worker_id: str):
         raise NotImplementedError
