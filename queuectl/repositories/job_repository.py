@@ -1,14 +1,23 @@
 from datetime import datetime, timedelta
 
-from sqlalchemy import and_, insert, or_, select, update
+from sqlalchemy import and_, insert, or_, select, update, func
 
 from queuectl.database.db import engine
 from queuectl.database.schema import jobs
+from queuectl.repositories.config_repository import ConfigRepository
 
 
 class JobRepository:
-    def enqueue(self, command: str, max_retries: int = 3):
+
+    def __init__(self):
+        self.config = ConfigRepository()
+
+    def enqueue(self, command: str):
         now = datetime.utcnow()
+
+        max_retries = self.config.get_int("max-retries")
+        if max_retries is None:
+            max_retries = 3
 
         with engine.begin() as conn:
             result = conn.execute(
@@ -34,49 +43,50 @@ class JobRepository:
 
         with engine.begin() as conn:
 
-            job = conn.execute(
-                select(jobs)
-                .where(
-                    and_(
-                        jobs.c.state == "pending",
-                        or_(
-                            jobs.c.next_retry_at.is_(None),
-                            jobs.c.next_retry_at <= now,
-                        ),
+            while True:
+
+                job = conn.execute(
+                    select(jobs)
+                    .where(
+                        and_(
+                            jobs.c.state == "pending",
+                            or_(
+                                jobs.c.next_retry_at.is_(None),
+                                jobs.c.next_retry_at <= now,
+                            ),
+                        )
+                    )
+                    .order_by(jobs.c.created_at)
+                    .limit(1)
+                ).mappings().first()
+
+                if job is None:
+                    return None
+
+                updated = conn.execute(
+                    update(jobs)
+                    .where(
+                        and_(
+                            jobs.c.id == job["id"],
+                            jobs.c.state == "pending",
+                        )
+                    )
+                    .values(
+                        state="processing",
+                        claimed_by=worker_id,
+                        claimed_at=now,
+                        updated_at=now,
                     )
                 )
-                .order_by(jobs.c.created_at)
-                .limit(1)
-            ).mappings().first()
 
-            if job is None:
-                return None
-
-            updated = conn.execute(
-                update(jobs)
-                .where(
-                    and_(
-                        jobs.c.id == job["id"],
-                        jobs.c.state == "pending",
-                    )
-                )
-                .values(
-                    state="processing",
-                    claimed_by=worker_id,
-                    claimed_at=now,
-                    updated_at=now,
-                )
-                .returning(jobs)
-            ).mappings().first()
-
-            return updated
+                if updated.rowcount == 1:
+                    return self.get_job(job["id"])
 
     def mark_completed(self, job_id: int):
         now = datetime.utcnow()
 
         with engine.begin() as conn:
-
-            result = conn.execute(
+            conn.execute(
                 update(jobs)
                 .where(jobs.c.id == job_id)
                 .values(
@@ -86,17 +96,15 @@ class JobRepository:
                     finished_at=now,
                     updated_at=now,
                 )
-                .returning(jobs)
             )
 
-            return result.mappings().first()
+        return self.get_job(job_id)
 
     def mark_failed(self, job_id: int, error: str):
         now = datetime.utcnow()
 
         with engine.begin() as conn:
-
-            result = conn.execute(
+            conn.execute(
                 update(jobs)
                 .where(jobs.c.id == job_id)
                 .values(
@@ -105,32 +113,32 @@ class JobRepository:
                     last_error=error,
                     updated_at=now,
                 )
-                .returning(jobs)
             )
 
-            return result.mappings().first()
+        return self.get_job(job_id)
 
     def retry_job(self, job_id: int):
+
+        job = self.get_job(job_id)
+
+        if job is None:
+            return None
+
+        attempts = job["attempts"]
+
+        if attempts >= job["max_retries"]:
+            return self.move_to_dead(job_id)
+
+        base = self.config.get_int("backoff-base")
+        if base is None:
+            base = 2
+
+        delay = base ** attempts
+
         now = datetime.utcnow()
 
         with engine.begin() as conn:
-
-            job = conn.execute(
-                select(jobs).where(jobs.c.id == job_id)
-            ).mappings().first()
-
-            if job is None:
-                return None
-
-            attempts = job["attempts"]
-            max_retries = job["max_retries"]
-
-            if attempts >= max_retries:
-                return self.move_to_dead(job_id)
-
-            delay = 2 ** attempts
-
-            result = conn.execute(
+            conn.execute(
                 update(jobs)
                 .where(jobs.c.id == job_id)
                 .values(
@@ -140,16 +148,15 @@ class JobRepository:
                     next_retry_at=now + timedelta(seconds=delay),
                     updated_at=now,
                 )
-                .returning(jobs)
             )
 
-            return result.mappings().first()
+        return self.get_job(job_id)
+
     def move_to_dead(self, job_id: int):
         now = datetime.utcnow()
 
         with engine.begin() as conn:
-
-            result = conn.execute(
+            conn.execute(
                 update(jobs)
                 .where(jobs.c.id == job_id)
                 .values(
@@ -159,17 +166,40 @@ class JobRepository:
                     finished_at=now,
                     updated_at=now,
                 )
-                .returning(jobs)
             )
 
-            return result.mappings().first()
+        return self.get_job(job_id)
 
+    def retry_dead_job(self, job_id: int):
+
+        now = datetime.utcnow()
+
+        with engine.begin() as conn:
+            conn.execute(
+                update(jobs)
+                .where(
+                    and_(
+                        jobs.c.id == job_id,
+                        jobs.c.state == "dead",
+                    )
+                )
+                .values(
+                    state="pending",
+                    attempts=0,
+                    claimed_by=None,
+                    claimed_at=None,
+                    next_retry_at=None,
+                    finished_at=None,
+                    updated_at=now,
+                )
+            )
+
+        return self.get_job(job_id)
     def recover_processing_jobs(self, timeout_seconds: int = 60):
         threshold = datetime.utcnow() - timedelta(seconds=timeout_seconds)
 
         with engine.begin() as conn:
-
-            result = conn.execute(
+            conn.execute(
                 update(jobs)
                 .where(
                     and_(
@@ -183,73 +213,90 @@ class JobRepository:
                     claimed_at=None,
                     updated_at=datetime.utcnow(),
                 )
-                .returning(jobs)
             )
 
-            return result.mappings().all()
+        return self.list_jobs("pending")
 
     def get_job(self, job_id: int):
         with engine.connect() as conn:
-            result = conn.execute(
-                select(jobs).where(jobs.c.id == job_id)
-            )
+            return conn.execute(
+                select(jobs)
+                .where(jobs.c.id == job_id)
+            ).mappings().first()
 
-            return result.mappings().first()
+    def list_jobs(self, state=None):
+        with engine.connect() as conn:
+
+            query = select(jobs)
+
+            if state:
+                query = query.where(jobs.c.state == state)
+
+            query = query.order_by(jobs.c.created_at)
+
+            return conn.execute(query).mappings().all()
 
     def get_all_jobs(self):
-        with engine.connect() as conn:
-            result = conn.execute(
-                select(jobs).order_by(jobs.c.created_at)
-            )
-
-            return result.mappings().all()
+        return self.list_jobs()
 
     def get_pending_jobs(self):
-        with engine.connect() as conn:
-            result = conn.execute(
-                select(jobs)
-                .where(jobs.c.state == "pending")
-                .order_by(jobs.c.created_at)
-            )
-
-            return result.mappings().all()
+        return self.list_jobs("pending")
 
     def get_processing_jobs(self):
-        with engine.connect() as conn:
-            result = conn.execute(
-                select(jobs)
-                .where(jobs.c.state == "processing")
-                .order_by(jobs.c.created_at)
-            )
-
-            return result.mappings().all()
+        return self.list_jobs("processing")
 
     def get_completed_jobs(self):
-        with engine.connect() as conn:
-            result = conn.execute(
-                select(jobs)
-                .where(jobs.c.state == "completed")
-                .order_by(jobs.c.created_at)
-            )
-
-            return result.mappings().all()
+        return self.list_jobs("completed")
 
     def get_failed_jobs(self):
-        with engine.connect() as conn:
-            result = conn.execute(
-                select(jobs)
-                .where(jobs.c.state == "failed")
-                .order_by(jobs.c.created_at)
-            )
-
-            return result.mappings().all()
+        return self.list_jobs("failed")
 
     def get_dead_jobs(self):
-        with engine.connect() as conn:
-            result = conn.execute(
-                select(jobs)
-                .where(jobs.c.state == "dead")
-                .order_by(jobs.c.created_at)
-            )
+        return self.list_jobs("dead")
 
-            return result.mappings().all()    
+    def stats(self):
+        with engine.connect() as conn:
+
+            total = conn.execute(
+                select(func.count())
+                .select_from(jobs)
+            ).scalar()
+
+            pending = conn.execute(
+                select(func.count())
+                .select_from(jobs)
+                .where(jobs.c.state == "pending")
+            ).scalar()
+
+            processing = conn.execute(
+                select(func.count())
+                .select_from(jobs)
+                .where(jobs.c.state == "processing")
+            ).scalar()
+
+            completed = conn.execute(
+                select(func.count())
+                .select_from(jobs)
+                .where(jobs.c.state == "completed")
+            ).scalar()
+
+            failed = conn.execute(
+                select(func.count())
+                .select_from(jobs)
+                .where(jobs.c.state == "failed")
+            ).scalar()
+
+            dead = conn.execute(
+                select(func.count())
+                .select_from(jobs)
+                .where(jobs.c.state == "dead")
+            ).scalar()
+
+            return {
+                "total": total,
+                "pending": pending,
+                "processing": processing,
+                "completed": completed,
+                "failed": failed,
+                "dead": dead,
+            }
