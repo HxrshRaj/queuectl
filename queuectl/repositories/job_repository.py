@@ -3,7 +3,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import and_, insert, or_, select, update, func
 
 from queuectl.database.db import engine
-from queuectl.database.schema import jobs
+from queuectl.database.schema import jobs, workers
 from queuectl.repositories.config_repository import ConfigRepository
 
 
@@ -39,14 +39,13 @@ class JobRepository:
             return result.inserted_primary_key[0]
 
     def claim_job(self, worker_id: str):
-        now = datetime.utcnow()
+        while True:
+            now = datetime.utcnow()
 
-        with engine.begin() as conn:
-
-            while True:
+            with engine.begin() as conn:
 
                 job = conn.execute(
-                    select(jobs)
+                    select(jobs.c.id)
                     .where(
                         and_(
                             jobs.c.state == "pending",
@@ -58,7 +57,7 @@ class JobRepository:
                     )
                     .order_by(jobs.c.created_at)
                     .limit(1)
-                ).mappings().first()
+                ).first()
 
                 if job is None:
                     return None
@@ -67,7 +66,7 @@ class JobRepository:
                     update(jobs)
                     .where(
                         and_(
-                            jobs.c.id == job["id"],
+                            jobs.c.id == job[0],
                             jobs.c.state == "pending",
                         )
                     )
@@ -80,7 +79,10 @@ class JobRepository:
                 )
 
                 if updated.rowcount == 1:
-                    return self.get_job(job["id"])
+                    return conn.execute(
+                        select(jobs)
+                        .where(jobs.c.id == job[0])
+                    ).mappings().first()
 
     def mark_completed(self, job_id: int):
         now = datetime.utcnow()
@@ -197,25 +199,44 @@ class JobRepository:
         return self.get_job(job_id)
     def recover_processing_jobs(self, timeout_seconds: int = 60):
         threshold = datetime.utcnow() - timedelta(seconds=timeout_seconds)
+        now = datetime.utcnow()
 
         with engine.begin() as conn:
-            conn.execute(
-                update(jobs)
+            recovered_ids = conn.execute(
+                select(jobs.c.id)
+                .select_from(
+                    jobs.outerjoin(
+                        workers,
+                        jobs.c.claimed_by == workers.c.worker_id,
+                    )
+                )
                 .where(
                     and_(
                         jobs.c.state == "processing",
-                        jobs.c.claimed_at < threshold,
+                        or_(
+                            workers.c.worker_id.is_(None),
+                                workers.c.heartbeat.is_(None),
+                            workers.c.heartbeat < threshold,
+                        ),
                     )
                 )
+            ).scalars().all()
+
+            if not recovered_ids:
+                return []
+
+            conn.execute(
+                update(jobs)
+                .where(jobs.c.id.in_(recovered_ids))
                 .values(
                     state="pending",
                     claimed_by=None,
                     claimed_at=None,
-                    updated_at=datetime.utcnow(),
+                    updated_at=now,
                 )
             )
 
-        return self.list_jobs("pending")
+            return recovered_ids
 
     def get_job(self, job_id: int):
         with engine.connect() as conn:

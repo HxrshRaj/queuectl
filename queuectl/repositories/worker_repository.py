@@ -1,10 +1,9 @@
 from datetime import datetime, timedelta
 
-from sqlalchemy import delete, insert, select, update
+from sqlalchemy import delete, insert, select, update, func
 
 from queuectl.database.db import engine
 from queuectl.database.schema import workers
-from sqlalchemy import func
 
 
 class WorkerRepository:
@@ -66,6 +65,7 @@ class WorkerRepository:
                 .values(
                     status="stopped",
                     heartbeat=datetime.utcnow(),
+                    stop_requested=True,
                 )
             )
 

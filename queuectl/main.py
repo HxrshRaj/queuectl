@@ -1,8 +1,10 @@
 import argparse
+import json
+import subprocess
+
 from queuectl.services.queue_service import QueueService
 from queuectl.services.worker_service import WorkerService
 from queuectl.repositories.config_repository import ConfigRepository
-
 
 queue = QueueService()
 workers = WorkerService()
@@ -10,13 +12,19 @@ config = ConfigRepository()
 
 
 def enqueue(args):
-    job = queue.enqueue(args.command)
+    command = subprocess.list2cmdline(args.command).strip()
+
+    if not command:
+        print("No command provided.")
+        return
+
+    job = queue.enqueue(command)
+
     print(f"Job {job} queued.")
 
 
 def worker_start(args):
-    workers.start(args.count)
-    print(f"Started {args.count} worker(s).")
+    workers.start_and_wait(args.count)
 
 
 def worker_stop(args):
@@ -27,17 +35,23 @@ def worker_stop(args):
 def status(args):
     stats = queue.status()
 
-    print(f"Total      : {stats['total']}")
-    print(f"Pending    : {stats['pending']}")
-    print(f"Processing : {stats['processing']}")
-    print(f"Completed  : {stats['completed']}")
-    print(f"Failed     : {stats['failed']}")
-    print(f"Dead       : {stats['dead']}")
-    print(f"Workers    : {workers.active()}")
+    print("\nQueue Status")
+    print("-" * 35)
+    print(f"Total Jobs     : {stats['total']}")
+    print(f"Pending        : {stats['pending']}")
+    print(f"Processing     : {stats['processing']}")
+    print(f"Completed      : {stats['completed']}")
+    print(f"Failed         : {stats['failed']}")
+    print(f"Dead Letter    : {stats['dead']}")
+    print(f"Active Workers : {workers.active()}")
 
 
 def list_jobs(args):
     jobs = queue.list_jobs(args.state)
+
+    if args.json:
+        print(json.dumps(jobs, default=str, indent=2))
+        return
 
     if not jobs:
         print("No jobs found.")
@@ -61,42 +75,121 @@ def dlq_list(args):
 
     for job in jobs:
         print(
-            f"[{job['id']}] {job['command']}"
+            f"[{job['id']}] "
+            f"{job['command']} "
+            f"(attempts={job['attempts']})"
         )
 
 
 def dlq_retry(args):
-    queue.retry_dead(args.job_id)
-    print("Job moved back to queue.")
+    if args.job_id is None:
+
+        jobs = queue.list_jobs("dead")
+
+        for job in jobs:
+            queue.retry_dead(job["id"])
+
+        print(f"Retried {len(jobs)} job(s).")
+
+    else:
+        queue.retry_dead(args.job_id)
+        print(f"Retried job {args.job_id}.")
+
+
+def config_get(args):
+    rows = config.all()
+
+    if not rows:
+        print("No configuration found.")
+        return
+
+    for row in rows:
+        print(f"{row['key']} = {row['value']}")
 
 
 def config_set(args):
     config.set(args.key, args.value)
     print("Configuration updated.")
 def build_parser():
-    parser = argparse.ArgumentParser(prog="queuectl")
+    parser = argparse.ArgumentParser(
+        prog="queuectl",
+        description="QueueCTL - Distributed Job Queue"
+    )
 
     sub = parser.add_subparsers(dest="command")
 
-    p = sub.add_parser("enqueue")
-    p.add_argument("command")
-    p.set_defaults(func=enqueue)
+    # ------------------------
+    # enqueue
+    # ------------------------
+    enqueue_parser = sub.add_parser(
+        "enqueue",
+        help="Enqueue a command"
+    )
 
-    worker = sub.add_parser("worker")
-    worker_sub = worker.add_subparsers(dest="action")
+    enqueue_parser.add_argument(
+        "command",
+        nargs=argparse.REMAINDER,
+        help="Command to execute"
+    )
 
-    ws = worker_sub.add_parser("start")
-    ws.add_argument("--count", type=int, default=1)
-    ws.set_defaults(func=worker_start)
+    enqueue_parser.set_defaults(func=enqueue)
 
-    wt = worker_sub.add_parser("stop")
-    wt.set_defaults(func=worker_stop)
+    # ------------------------
+    # worker
+    # ------------------------
+    worker_parser = sub.add_parser(
+        "worker",
+        help="Worker operations"
+    )
 
-    st = sub.add_parser("status")
-    st.set_defaults(func=status)
+    worker_sub = worker_parser.add_subparsers(dest="action")
 
-    ls = sub.add_parser("list")
-    ls.add_argument(
+    worker_start_parser = worker_sub.add_parser(
+        "start",
+        help="Start workers"
+    )
+
+    worker_start_parser.add_argument(
+        "--count",
+        type=int,
+        default=1,
+        help="Number of workers"
+    )
+
+    worker_start_parser.set_defaults(
+        func=worker_start
+    )
+
+    worker_stop_parser = worker_sub.add_parser(
+        "stop",
+        help="Stop workers"
+    )
+
+    worker_stop_parser.set_defaults(
+        func=worker_stop
+    )
+
+    # ------------------------
+    # status
+    # ------------------------
+    status_parser = sub.add_parser(
+        "status",
+        help="Queue status"
+    )
+
+    status_parser.set_defaults(
+        func=status
+    )
+
+    # ------------------------
+    # list
+    # ------------------------
+    list_parser = sub.add_parser(
+        "list",
+        help="List jobs"
+    )
+
+    list_parser.add_argument(
         "--state",
         choices=[
             "pending",
@@ -105,26 +198,84 @@ def build_parser():
             "failed",
             "dead",
         ],
+        help="Filter by state",
     )
-    ls.set_defaults(func=list_jobs)
 
-    dlq = sub.add_parser("dlq")
-    dlq_sub = dlq.add_subparsers(dest="action")
+    list_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output JSON",
+    )
 
-    l = dlq_sub.add_parser("list")
-    l.set_defaults(func=dlq_list)
+    list_parser.set_defaults(
+        func=list_jobs
+    )
 
-    r = dlq_sub.add_parser("retry")
-    r.add_argument("job_id", type=int)
-    r.set_defaults(func=dlq_retry)
+    # ------------------------
+    # dlq
+    # ------------------------
+    dlq_parser = sub.add_parser(
+        "dlq",
+        help="Dead Letter Queue"
+    )
 
-    cfg = sub.add_parser("config")
-    cfg_sub = cfg.add_subparsers(dest="action")
+    dlq_sub = dlq_parser.add_subparsers(dest="action")
 
-    s = cfg_sub.add_parser("set")
-    s.add_argument("key")
-    s.add_argument("value")
-    s.set_defaults(func=config_set)
+    dlq_list_parser = dlq_sub.add_parser(
+        "list",
+        help="List dead jobs"
+    )
+
+    dlq_list_parser.set_defaults(
+        func=dlq_list
+    )
+
+    dlq_retry_parser = dlq_sub.add_parser(
+        "retry",
+        help="Retry dead jobs"
+    )
+
+    dlq_retry_parser.add_argument(
+        "job_id",
+        nargs="?",
+        type=int,
+        help="Retry specific job (optional)",
+    )
+
+    dlq_retry_parser.set_defaults(
+        func=dlq_retry
+    )
+
+    # ------------------------
+    # config
+    # ------------------------
+    config_parser = sub.add_parser(
+        "config",
+        help="Configuration"
+    )
+
+    config_sub = config_parser.add_subparsers(dest="action")
+
+    config_get_parser = config_sub.add_parser(
+        "get",
+        help="Show configuration"
+    )
+
+    config_get_parser.set_defaults(
+        func=config_get
+    )
+
+    config_set_parser = config_sub.add_parser(
+        "set",
+        help="Set configuration value"
+    )
+
+    config_set_parser.add_argument("key")
+    config_set_parser.add_argument("value")
+
+    config_set_parser.set_defaults(
+        func=config_set
+    )
 
     return parser
 
@@ -134,10 +285,11 @@ def main():
 
     args = parser.parse_args()
 
-    if hasattr(args, "func"):
-        args.func(args)
-    else:
+    if not hasattr(args, "func"):
         parser.print_help()
+        return
+
+    args.func(args)
 
 
 if __name__ == "__main__":

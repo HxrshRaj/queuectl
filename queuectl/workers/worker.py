@@ -2,6 +2,7 @@ import os
 import signal
 import time
 import uuid
+import threading
 
 from queuectl.repositories.job_repository import JobRepository
 from queuectl.repositories.worker_repository import WorkerRepository
@@ -30,21 +31,46 @@ class Worker:
     def stop(self, signum=None, frame=None):
         self.running = False
 
+    def _heartbeat_loop(self):
+        poll_interval = self.config.get_int(
+            "poll-interval"
+        )
+
+        if poll_interval is None:
+            poll_interval = 1
+
+        while self.running:
+            self.workers.heartbeat(
+                self.worker_id
+            )
+            time.sleep(poll_interval)
+
     def start(self):
 
         self.config.initialize()
 
-        self.recovery.recover()
+        self.recover()
 
         self.workers.register(
             self.worker_id,
             self.pid,
         )
 
+        heartbeat_thread = threading.Thread(
+            target=self._heartbeat_loop,
+            daemon=True,
+        )
+        heartbeat_thread.start()
+
         try:
             self.loop()
 
         finally:
+            self.running = False
+
+            if heartbeat_thread.is_alive():
+                heartbeat_thread.join(timeout=2)
+
             try:
                 self.workers.mark_stopped(
                     self.worker_id
@@ -138,3 +164,31 @@ class Worker:
         print(
             f"[{self.worker_id}] Job {updated['id']} scheduled for retry ({updated['attempts']}/{updated['max_retries']})"
         )
+
+    @classmethod
+    def run(cls):
+        worker = cls()
+        worker.start()
+    def recover(self):
+        timeout = self.config.get_int("recovery-timeout")
+
+        if timeout is None:
+            timeout = 60
+
+        recovered = self.jobs.recover_processing_jobs(timeout)
+
+        if recovered:
+            print(f"Recovered {len(recovered)} abandoned job(s).")
+
+    def shutdown(self):
+        try:
+            self.workers.mark_stopped(self.worker_id)
+        finally:
+            self.workers.unregister(self.worker_id)
+
+        print(f"Worker {self.worker_id} stopped.")
+
+    @classmethod
+    def run(cls):
+        worker = cls()
+        worker.start()

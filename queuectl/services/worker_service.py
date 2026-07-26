@@ -8,25 +8,20 @@ class WorkerService:
 
     def __init__(self):
         self.repo = WorkerRepository()
+        self._processes = []
 
     def start(self, count=1):
-
         processes = []
 
         for _ in range(count):
-
-            process = multiprocessing.Process(
-                target=Worker.run,
-            )
-
+            process = multiprocessing.Process(target=Worker.run)
             process.start()
-
             processes.append(process)
 
+        self._processes = processes
         return processes
 
     def start_and_wait(self, count=1):
-
         processes = self.start(count)
 
         try:
@@ -37,7 +32,10 @@ class WorkerService:
             self.stop()
 
             for process in processes:
-                process.join()
+                if process.is_alive():
+                    process.join()
+
+        return processes
 
     def stop(self):
         self.repo.request_stop_all()
