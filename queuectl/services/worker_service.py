@@ -10,19 +10,34 @@ class WorkerService:
         self.repo = WorkerRepository()
 
     def start(self, count=1):
+
         processes = []
 
         for _ in range(count):
+
             process = multiprocessing.Process(
                 target=Worker.run,
             )
 
-            process.daemon = False
             process.start()
 
             processes.append(process)
 
         return processes
+
+    def start_and_wait(self, count=1):
+
+        processes = self.start(count)
+
+        try:
+            for process in processes:
+                process.join()
+
+        except KeyboardInterrupt:
+            self.stop()
+
+            for process in processes:
+                process.join()
 
     def stop(self):
         self.repo.request_stop_all()
