@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import insert
+from sqlalchemy import insert, select, update
 
 from queuectl.database.db import engine
 from queuectl.database.schema import jobs
@@ -28,7 +28,33 @@ class JobRepository:
         return result.inserted_primary_key[0]
 
     def claim_job(self, worker_id: str):
-        raise NotImplementedError
+        now = datetime.utcnow()
+
+        oldest_pending_job_id = (
+            select(jobs.c.id)
+            .where(jobs.c.state == "pending")
+            .order_by(jobs.c.created_at.asc(), jobs.c.id.asc())
+            .limit(1)
+            .scalar_subquery()
+        )
+
+        with engine.begin() as connection:
+            result = connection.execute(
+                update(jobs)
+                .where(
+                    jobs.c.id == oldest_pending_job_id,
+                    jobs.c.state == "pending",
+)
+                .values(
+                    state="processing",
+                    claimed_by=worker_id,
+                    claimed_at=now,
+                    updated_at=now,
+                )
+                .returning(jobs)
+            )
+
+            return result.mappings().first()
 
     def mark_completed(self, job_id: int):
         raise NotImplementedError
