@@ -4,6 +4,7 @@ from sqlalchemy import delete, insert, select, update
 
 from queuectl.database.db import engine
 from queuectl.database.schema import workers
+from sqlalchemy import func
 
 
 class WorkerRepository:
@@ -92,9 +93,10 @@ class WorkerRepository:
     def active_count(self):
         with engine.connect() as conn:
             return conn.execute(
-                select(workers)
+                select(func.count())
+                .select_from(workers)
                 .where(workers.c.status == "running")
-            ).rowcount
+            ).scalar_one()
 
     def stale_workers(self, timeout_seconds: int = 60):
         threshold = datetime.utcnow() - timedelta(seconds=timeout_seconds)
