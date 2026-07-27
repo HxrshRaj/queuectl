@@ -68,6 +68,10 @@ class JobRepository:
                         and_(
                             jobs.c.id == job[0],
                             jobs.c.state == "pending",
+                            or_(
+                                jobs.c.next_retry_at.is_(None),
+                                jobs.c.next_retry_at <= now,
+                            ),
                         )
                     )
                     .values(
@@ -104,18 +108,49 @@ class JobRepository:
 
     def mark_failed(self, job_id: int, error: str):
         now = datetime.utcnow()
+        base = self.config.get_int("backoff-base")
+        if base is None:
+            base = 2
 
         with engine.begin() as conn:
-            conn.execute(
-                update(jobs)
-                .where(jobs.c.id == job_id)
-                .values(
-                    state="failed",
-                    attempts=jobs.c.attempts + 1,
-                    last_error=error,
-                    updated_at=now,
+            job = conn.execute(
+                select(jobs).where(jobs.c.id == job_id)
+            ).mappings().first()
+
+            if job is None:
+                return None
+
+            attempts = job["attempts"] + 1
+
+            if attempts >= job["max_retries"]:
+                conn.execute(
+                    update(jobs)
+                    .where(jobs.c.id == job_id)
+                    .values(
+                        state="dead",
+                        attempts=attempts,
+                        last_error=error,
+                        claimed_by=None,
+                        claimed_at=None,
+                        finished_at=now,
+                        updated_at=now,
+                    )
                 )
-            )
+            else:
+                delay = base ** (attempts - 1)
+                conn.execute(
+                    update(jobs)
+                    .where(jobs.c.id == job_id)
+                    .values(
+                        state="pending",
+                        attempts=attempts,
+                        last_error=error,
+                        claimed_by=None,
+                        claimed_at=None,
+                        next_retry_at=now + timedelta(seconds=delay),
+                        updated_at=now,
+                    )
+                )
 
         return self.get_job(job_id)
 
@@ -227,7 +262,12 @@ class JobRepository:
 
             conn.execute(
                 update(jobs)
-                .where(jobs.c.id.in_(recovered_ids))
+                .where(
+                    and_(
+                        jobs.c.id.in_(recovered_ids),
+                        jobs.c.state == "processing",
+                    )
+                )
                 .values(
                     state="pending",
                     claimed_by=None,

@@ -2,6 +2,7 @@ import argparse
 import json
 import subprocess
 
+from queuectl.database.db import init_database
 from queuectl.services.queue_service import QueueService
 from queuectl.services.worker_service import WorkerService
 from queuectl.repositories.config_repository import ConfigRepository
@@ -281,6 +282,9 @@ def build_parser():
 
 
 def main():
+    init_database()
+    config.initialize()
+
     parser = build_parser()
 
     args = parser.parse_args()

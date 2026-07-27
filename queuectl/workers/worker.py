@@ -1,3 +1,4 @@
+import logging
 import os
 import signal
 import time
@@ -8,8 +9,13 @@ from queuectl.repositories.job_repository import JobRepository
 from queuectl.repositories.worker_repository import WorkerRepository
 from queuectl.repositories.config_repository import ConfigRepository
 from queuectl.utils.executor import Executor
-from queuectl.utils.recovery import RecoveryManager
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger(__name__)
 
 class Worker:
 
@@ -21,7 +27,6 @@ class Worker:
         self.workers = WorkerRepository()
         self.config = ConfigRepository()
         self.executor = Executor()
-        self.recovery = RecoveryManager()
 
         self.running = True
 
@@ -121,7 +126,7 @@ class Worker:
                     job["id"]
                 )
 
-                print(
+                logger.info(
                     f"[{self.worker_id}] Job {job['id']} completed"
                 )
 
@@ -139,36 +144,16 @@ class Worker:
             )
 
     def handle_failure(self, job, error):
-
         updated = self.jobs.mark_failed(
             job["id"],
             error,
         )
 
-        if updated["attempts"] >= updated["max_retries"]:
+        if updated["state"] == "dead":
+            logger.warning(f"[{self.worker_id}] Job {updated['id']} moved to DLQ (Error: {error})")
+        else:
+            logger.info(f"[{self.worker_id}] Job {updated['id']} scheduled for retry ({updated['attempts']}/{updated['max_retries']}) (Error: {error})")
 
-            self.jobs.move_to_dead(
-                updated["id"],
-            )
-
-            print(
-                f"[{self.worker_id}] Job {updated['id']} moved to DLQ"
-            )
-
-            return
-
-        self.jobs.retry_job(
-            updated["id"]
-        )
-
-        print(
-            f"[{self.worker_id}] Job {updated['id']} scheduled for retry ({updated['attempts']}/{updated['max_retries']})"
-        )
-
-    @classmethod
-    def run(cls):
-        worker = cls()
-        worker.start()
     def recover(self):
         timeout = self.config.get_int("recovery-timeout")
 
@@ -178,7 +163,7 @@ class Worker:
         recovered = self.jobs.recover_processing_jobs(timeout)
 
         if recovered:
-            print(f"Recovered {len(recovered)} abandoned job(s).")
+            logger.info(f"[{self.worker_id}] Recovered {len(recovered)} abandoned job(s).")
 
     def shutdown(self):
         try:
@@ -186,7 +171,7 @@ class Worker:
         finally:
             self.workers.unregister(self.worker_id)
 
-        print(f"Worker {self.worker_id} stopped.")
+        logger.info(f"[{self.worker_id}] Worker stopped.")
 
     @classmethod
     def run(cls):
