@@ -1,30 +1,32 @@
 # QueueCTL
 
-QueueCTL is a lightweight command-line job queue system built in Python. It allows users to enqueue shell commands, execute them asynchronously using multiple worker processes, automatically retry failed jobs with exponential backoff, and recover work after unexpected worker crashes.
+QueueCTL is a lightweight command-line job queue system built in Python that allows users to enqueue shell commands, process them asynchronously using one or more worker processes, automatically retry failed jobs with exponential backoff, and recover interrupted work after unexpected worker crashes.
 
-The project is designed around a clean layered architecture using the Repository Pattern and SQLAlchemy Core with SQLite.
+The project follows a clean layered architecture based on the **Repository Pattern** using **SQLAlchemy Core** with **SQLite** as the persistent storage backend.
 
 ---
 
-## Features
+# Features
 
-- Command-line interface
-- Persistent SQLite-backed queue
-- Multiple worker processes
+- Command-line interface (CLI)
+- Persistent SQLite-backed job queue
+- JSON-based job submission
+- Multiple concurrent worker processes
 - Atomic job claiming
+- Exactly-once job execution
 - Automatic retries
-- Exponential backoff
+- Configurable exponential backoff
 - Dead Letter Queue (DLQ)
 - Worker heartbeat monitoring
-- Crash recovery
-- Graceful shutdown
-- Configurable retry settings
-- Repository and Service layer architecture
+- Automatic crash recovery
+- Graceful worker shutdown
+- Runtime configuration management
+- Repository Pattern architecture
 - SQLAlchemy Core (No ORM)
 
 ---
 
-## Project Structure
+# Project Structure
 
 ```
 queuectl/
@@ -54,75 +56,107 @@ queuectl/
 
 ---
 
-## Architecture
+# Architecture
 
-The application follows a layered architecture.
+QueueCTL follows a layered architecture that separates business logic from persistence and command execution.
 
 ```
-CLI
-   │
-   ▼
-Service Layer
-   │
-   ▼
-Repository Layer
-   │
-   ▼
-SQLite Database
+           CLI
+            │
+            ▼
+     Service Layer
+            │
+            ▼
+   Repository Layer
+            │
+            ▼
+     SQLite Database
 ```
 
-Responsibilities are separated as follows:
+### Responsibilities
 
-- CLI handles user interaction.
-- Services contain business logic.
-- Repositories manage database access.
-- Workers execute jobs.
-- Recovery logic restores interrupted work.
+### CLI
+
+- Parses user commands
+- Validates input
+- Displays output
+
+### Service Layer
+
+- Business logic
+- Queue operations
+- Worker orchestration
+
+### Repository Layer
+
+- Database transactions
+- Atomic job claiming
+- Configuration persistence
+- Worker heartbeat management
+
+### Worker Layer
+
+- Executes shell commands
+- Handles retries
+- Updates job state
+- Sends heartbeats
+- Performs crash recovery
 
 ---
 
-## Database Schema
+# Database Schema
 
-### Jobs
+## Jobs
 
 | Column | Description |
 |---------|-------------|
-| id | Job identifier |
+| id | Database job identifier |
 | command | Shell command |
-| state | pending / processing / completed / failed / dead |
-| attempts | Retry count |
+| state | pending / processing / completed / dead |
+| attempts | Retry attempts |
 | max_retries | Maximum retries |
 | next_retry_at | Next eligible execution time |
-| claimed_by | Worker ID |
-| claimed_at | Claim timestamp |
-| last_error | Last execution error |
-| created_at | Creation time |
-| updated_at | Last update |
-| finished_at | Completion time |
+| claimed_by | Worker UUID |
+| claimed_at | Timestamp when claimed |
+| last_error | Most recent execution error |
+| created_at | Creation timestamp |
+| updated_at | Last modification |
+| finished_at | Completion timestamp |
 
-### Workers
+---
+
+## Workers
 
 | Column | Description |
 |---------|-------------|
 | worker_id | Worker UUID |
-| pid | Process ID |
+| pid | Operating system process ID |
 | status | running / stopped |
-| heartbeat | Last heartbeat |
-| started_at | Worker start time |
-| stop_requested | Shutdown flag |
-
-### Config
-
-Simple key-value configuration table.
+| heartbeat | Last heartbeat timestamp |
+| started_at | Worker startup time |
+| stop_requested | Graceful shutdown flag |
 
 ---
 
-## Installation
+## Config
+
+Simple key-value table storing runtime configuration.
+
+Available settings include:
+
+- max-retries
+- backoff-base
+- poll-interval
+- recovery-timeout
+
+---
+
+# Installation
 
 Clone the repository.
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/<your-username>/queuectl.git
 cd queuectl
 ```
 
@@ -132,15 +166,15 @@ Create a virtual environment.
 python -m venv .venv
 ```
 
-Activate it.
+Activate the environment.
 
-Windows
+### Windows
 
 ```bash
 .venv\Scripts\activate
 ```
 
-Linux/macOS
+### Linux / macOS
 
 ```bash
 source .venv/bin/activate
@@ -154,111 +188,243 @@ pip install -r requirements.txt
 
 ---
 
-## Running
+# Usage
 
-Initialize the database if required.
-
-```bash
-python -m queuectl.main init
-```
-
-Start workers.
+## Enqueue a Job
 
 ```bash
-python -m queuectl.main worker start --count 2
-```
-
-Enqueue a job.
-
-```bash
-python -m queuectl.main enqueue "echo Hello World"
-```
-
-List jobs.
-
-```bash
-python -m queuectl.main list
-```
-
-Check queue status.
-
-```bash
-python -m queuectl.main status
-```
-
-Stop workers.
-
-```bash
-python -m queuectl.main worker stop
+queuectl enqueue '{"id":"job1","command":"echo Hello World"}'
 ```
 
 ---
 
-## Retry Policy
+## Start a Worker
 
-When a job fails:
+```bash
+queuectl worker start
+```
 
-1. Attempts are incremented.
-2. If retries remain, the job returns to the pending queue.
-3. The next execution time is calculated using exponential backoff.
-4. Once the retry limit is reached, the job is moved to the Dead Letter Queue.
+---
+
+## List Jobs
+
+```bash
+queuectl list
+```
+
+Filter by state:
+
+```bash
+queuectl list --state pending
+```
+
+Return JSON:
+
+```bash
+queuectl list --json
+```
+
+---
+
+## Queue Status
+
+```bash
+queuectl status
+```
 
 ---
 
 ## Dead Letter Queue
 
-Jobs exceeding the retry limit are marked as `dead`.
+View failed jobs:
 
-Dead jobs remain stored until explicitly retried or inspected through the CLI.
+```bash
+queuectl dlq list
+```
 
----
+Retry a dead job:
 
-## Worker Heartbeat
-
-Each worker periodically updates its heartbeat timestamp in the database.
-
-This allows the system to detect workers that terminate unexpectedly.
-
----
-
-## Crash Recovery
-
-On startup, the recovery manager checks for jobs stuck in the `processing` state.
-
-Jobs owned by missing or stale workers are safely returned to the pending queue for re-execution.
+```bash
+queuectl dlq retry <job-id>
+```
 
 ---
 
-## Graceful Shutdown
+## Configuration
+
+Display all configuration values.
+
+```bash
+queuectl config get
+```
+
+Update a configuration value.
+
+```bash
+queuectl config set max-retries 5
+```
+
+Example:
+
+```bash
+queuectl config set backoff-base 2
+```
+
+---
+
+# Example Workflow
+
+### 1. Enqueue a job
+
+```bash
+queuectl enqueue '{"id":"hello","command":"echo Hello QueueCTL"}'
+```
+
+### 2. Start a worker
+
+```bash
+queuectl worker start
+```
+
+### 3. Check queue status
+
+```bash
+queuectl status
+```
+
+### 4. View completed jobs
+
+```bash
+queuectl list --state completed
+```
+
+---
+
+# Retry Policy
+
+If a job execution fails:
+
+1. The retry counter is incremented.
+2. The job is returned to the pending queue.
+3. The next execution time is calculated using exponential backoff.
+
+```
+delay = backoff_base ^ attempts
+```
+
+For example, with:
+
+```
+backoff-base = 2
+```
+
+Retry delays become:
+
+| Attempt | Delay |
+|----------|------:|
+| 1 | 2 seconds |
+| 2 | 4 seconds |
+| 3 | Job moved to DLQ |
+
+Once the configured retry limit is reached, the job is moved to the Dead Letter Queue.
+
+---
+
+# Atomic Job Claiming
+
+QueueCTL guarantees that multiple workers cannot execute the same job simultaneously.
+
+Jobs are claimed atomically inside a database transaction before execution begins, ensuring exactly-once execution even when multiple workers are running concurrently.
+
+---
+
+# Dead Letter Queue (DLQ)
+
+Jobs exceeding the retry limit are marked as **dead**.
+
+Dead jobs remain stored for inspection and can later be retried using:
+
+```bash
+queuectl dlq retry <job-id>
+```
+
+---
+
+# Worker Heartbeats
+
+Each worker periodically updates its heartbeat in the database.
+
+Heartbeats are used to determine whether a worker is still alive while processing long-running jobs.
+
+---
+
+# Crash Recovery
+
+If a worker terminates unexpectedly:
+
+1. The heartbeat stops updating.
+2. The worker is considered stale after the configured `recovery-timeout`.
+3. A new worker automatically detects abandoned jobs.
+4. Interrupted jobs are safely returned to the pending queue.
+5. The jobs are executed normally without duplication.
+
+This allows QueueCTL to recover from unexpected worker crashes without losing queued work.
+
+---
+
+# Graceful Shutdown
 
 Workers respond to termination signals by:
 
 - stopping new job acquisition
-- completing the current job
-- updating worker status
+- finishing the current job
+- updating worker state
+- unregistering themselves
 - exiting cleanly
 
-This prevents partially executed jobs from being lost.
+This prevents partially processed jobs from being left in an inconsistent state.
 
 ---
 
-## Technologies
+# Technologies Used
 
-- Python
+- Python 3
 - SQLite
 - SQLAlchemy Core
-- multiprocessing
 - argparse
 - subprocess
+- threading
+- signal
 - logging
 
 ---
 
-## Design Goals
+# Design Principles
+
+QueueCTL was designed with the following goals:
 
 - Simplicity
 - Reliability
 - Recoverability
 - Separation of concerns
-- Easy maintenance
-- Minimal external dependencies
+- Transactional correctness
+- Minimal dependencies
+- Maintainability
+- Extensibility
+
+---
+
+# Key Design Decisions
+
+- SQLAlchemy Core is used instead of the ORM for explicit SQL queries and lightweight data access.
+- SQLite provides a simple persistent backend suitable for a local job queue.
+- The Repository Pattern separates persistence from business logic.
+- Worker heartbeats enable reliable crash detection.
+- Atomic database updates prevent duplicate execution across multiple workers.
+- Runtime configuration allows retry behavior to be adjusted without code changes.
+
+---
+
+# License
+
+This project was developed as part of a backend engineering assignment demonstrating concurrent job processing, fault tolerance, crash recovery, and layered software architecture.
