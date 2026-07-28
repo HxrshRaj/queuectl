@@ -12,10 +12,11 @@ class JobRepository:
     def __init__(self):
         self.config = ConfigRepository()
 
-    def enqueue(self, command: str):
+    def enqueue(self, command: str, max_retries=None):
         now = datetime.utcnow()
 
-        max_retries = self.config.get_int("max-retries")
+        if max_retries is None:
+            max_retries = self.config.get_int("max-retries")
         if max_retries is None:
             max_retries = 3
 
@@ -137,7 +138,7 @@ class JobRepository:
                     )
                 )
             else:
-                delay = base ** (attempts - 1)
+                delay = base ** attempts
                 conn.execute(
                     update(jobs)
                     .where(jobs.c.id == job_id)

@@ -1,9 +1,10 @@
 from datetime import datetime, timedelta
 
-from sqlalchemy import delete, insert, select, update, func
+from sqlalchemy import delete, insert, select, update, func, and_, or_
 
 from queuectl.database.db import engine
 from queuectl.database.schema import workers
+from queuectl.repositories.config_repository import ConfigRepository
 
 
 class WorkerRepository:
@@ -91,11 +92,24 @@ class WorkerRepository:
             ).mappings().all()
 
     def active_count(self):
+        # Exclude workers whose heartbeat has gone stale (same threshold used by
+        # job recovery). This handles both orphaned rows left by crashed/killed
+        # processes that never ran unregister(), and workers pending a graceful stop.
+        timeout = ConfigRepository().get_int("recovery-timeout")
+        if timeout is None:
+            timeout = 60
+        threshold = datetime.utcnow() - timedelta(seconds=timeout)
+
         with engine.connect() as conn:
             return conn.execute(
                 select(func.count())
                 .select_from(workers)
-                .where(workers.c.status == "running")
+                .where(
+                    and_(
+                        workers.c.status == "running",
+                        workers.c.heartbeat >= threshold,
+                    )
+                )
             ).scalar_one()
 
     def stale_workers(self, timeout_seconds: int = 60):

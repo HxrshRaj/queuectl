@@ -6,8 +6,8 @@ class QueueService:
     def __init__(self):
         self.jobs = JobRepository()
 
-    def enqueue(self, command: str):
-        return self.jobs.enqueue(command)
+    def enqueue(self, command: str, max_retries=None):
+        return self.jobs.enqueue(command, max_retries=max_retries)
 
     def list_jobs(self, state=None):
         return self.jobs.list_jobs(state)

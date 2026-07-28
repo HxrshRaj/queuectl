@@ -1,6 +1,5 @@
 import argparse
 import json
-import subprocess
 
 from queuectl.database.db import init_database
 from queuectl.services.queue_service import QueueService
@@ -13,15 +12,34 @@ config = ConfigRepository()
 
 
 def enqueue(args):
-    command = subprocess.list2cmdline(args.command).strip()
+    raw = " ".join(args.command).strip()
 
-    if not command:
+    if not raw:
         print("No command provided.")
         return
 
-    job = queue.enqueue(command)
+    # Try to parse the input as a JSON payload.
+    # Expected shape: {"id": "...", "command": "...", "max_retries": N}
+    # If it is not valid JSON, treat it as a plain command string (backward compat).
+    job_id_label = None
+    max_retries_override = None
+    try:
+        payload = json.loads(raw)
+        if isinstance(payload, dict) and "command" in payload:
+            job_id_label = payload.get("id")
+            max_retries_override = payload.get("max_retries")
+            raw = payload["command"]
+    except (json.JSONDecodeError, ValueError):
+        pass
 
-    print(f"Job {job} queued.")
+    if not raw:
+        print("No command provided.")
+        return
+
+    job = queue.enqueue(raw, max_retries=max_retries_override)
+
+    display_id = job_id_label if job_id_label is not None else job
+    print(f"Job {display_id} queued (db id={job}).")
 
 
 def worker_start(args):
@@ -51,7 +69,7 @@ def list_jobs(args):
     jobs = queue.list_jobs(args.state)
 
     if args.json:
-        print(json.dumps(jobs, default=str, indent=2))
+        print(json.dumps([dict(job) for job in jobs], default=str, indent=2))
         return
 
     if not jobs:

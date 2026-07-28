@@ -1,0 +1,5 @@
+Metadata-Version: 2.4
+Name: queuectl
+Version: 0.0.0
+Summary: QueueCTL
+Requires-Python: >=3.11
