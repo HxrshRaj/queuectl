@@ -1,5 +1,34 @@
 # QueueCTL
 
+> 🎥 **Project Demo Video**  
+> **Watch here:** https://drive.google.com/file/d/1j1WsHm8x4nE3uKOHJv8YN-mmLq1d4Ml0/view?usp=sharing
+
+QueueCTL is a lightweight command-line job queue system built in Python that allows users to enqueue shell commands, process them asynchronously using one or more worker processes, automatically retry failed jobs with exponential backoff, and recover interrupted work after unexpected worker crashes.
+
+The project follows a clean layered architecture based on the **Repository Pattern** using **SQLAlchemy Core** with **SQLite** as the persistent storage backend.
+
+---
+
+## Demo
+
+The demonstration video covers:
+
+- Project architecture
+- Job enqueueing and execution
+- Multiple worker processing
+- Atomic job claiming
+- Retry mechanism with exponential backoff
+- Dead Letter Queue (DLQ)
+- Runtime configuration
+- Worker heartbeat monitoring
+- Crash recovery
+- Graceful shutdown
+
+🎥 **Demo Video:**  
+https://drive.google.com/file/d/1j1WsHm8x4nE3uKOHJv8YN-mmLq1d4Ml0/view?usp=sharing
+
+# QueueCTL
+
 QueueCTL is a lightweight command-line job queue system built in Python that allows users to enqueue shell commands, process them asynchronously using one or more worker processes, automatically retry failed jobs with exponential backoff, and recover interrupted work after unexpected worker crashes.
 
 The project follows a clean layered architecture based on the **Repository Pattern** using **SQLAlchemy Core** with **SQLite** as the persistent storage backend.
